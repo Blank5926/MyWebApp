@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Inventory Dashboard</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <script>
+        function updateData() {
+            fetch('/')
+                .then(response => response.text())
+                .then(html => {
+                    document.body.innerHTML = html;
+                });
+        }
+        setInterval(updateData, 600000); // Refresh every minute
+    </script>
+</head>
+<body>
+    <h1>Inventory Dashboard</h1>
+    <h2>Weekly Warehouse Movement Report: {{ start_date }} - {{ end_date }}</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Client Code</th>
+                <th>Job Site</th>
+                <th>Units</th>
+                <th>Product</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for order in orders %}
+            <tr>
+                <td>{{ order.client_code }}</td>
+                <td>{{ order.job_site }}</td>
+                <td>{{ order.units }}</td>
+                <td>{{ order.product_name }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <h2>Product Summary</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Product</th>
+                <th>Total Units</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for product in product_summary %}
+            <tr>
+                <td>{{ product.name }}</td>
+                <td>{{ product.units }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</body>
+</html>
