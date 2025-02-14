@@ -10,6 +10,7 @@ client = Client(
     access_token=os.getenv("SQUARE_ACCESS_TOKEN"),  # Store securely
     environment="production"  # Change to "sandbox" for testing
 )
+location_id = "LG3ZXFCTEXV12"
 
 # MySQL Database Connection
 def connect_db():
@@ -64,75 +65,137 @@ def save_to_csv(sold_items, filename):
 
     print(f"📁 CSV file saved: {filename}")
 
+def get_skus_for_orders(client, orders):
+    """
+    Given a list of order objects, return a list of tuples: (order_id, catalog_object_id, sku, quantity).
+    """
+    # 1. Gather all catalog_object_ids
+    catalog_ids = set()
+    for order in orders:
+        for item in order.get("line_items", []):
+            catalog_object_id = item.get("catalog_object_id")
+            if catalog_object_id:
+                catalog_ids.add(catalog_object_id)
+
+    # 2. Batch retrieve all item variations in one go
+    if not catalog_ids:
+        return []  # No catalog items to retrieve
+    
+    catalog_response = client.catalog.batch_retrieve_catalog_objects(
+        body={"object_ids": list(catalog_ids)}
+    )
+    
+    if not catalog_response.is_success():
+        print("Error in batch retrieval:", catalog_response.errors)
+        return []
+
+    # Map catalog_object_id -> SKU
+    sku_map = {}
+    retrieved_objects = catalog_response.body.get("objects", [])
+    for obj in retrieved_objects:
+        if obj.get("type") == "ITEM_VARIATION":
+            sku = obj.get("item_variation_data", {}).get("sku", None)
+            sku_map[obj["id"]] = sku
+
+    # 3. Build the result: For each line item, get the SKU from the map
+    results = []
+    for order in orders:
+        order_id = order.get("id")
+        for item in order.get("line_items", []):
+            catalog_object_id = item.get("catalog_object_id")
+            quantity = item.get("quantity")
+            sku = sku_map.get(catalog_object_id, None)
+            results.append((order_id, catalog_object_id, sku, quantity))
+
+    return results
+
+def get_time_range(hours=0, days=0, weeks=0):
+    """
+    Returns a (start_iso, end_iso) tuple for the specified time window.
+    - hours, days, and weeks are integers that will be summed up into a single timedelta.
+    """
+    now = datetime.now(timezone.utc)
+    delta = timedelta(hours=hours, days=days, weeks=weeks)
+    start_time = now - delta
+    
+    # Convert to ISO 8601 strings as required by the Square API
+    start_iso = start_time.isoformat()
+    end_iso = now.isoformat()
+    
+    return start_iso, end_iso
+
 # Fetch sales data from Square API
-def fetch_sold_items(start_date, end_date, csv_prefix):
-    body = {
-        "location_ids": ["YOUR_LOCATION_ID"],  # Replace with your Square location ID
+def search_completed_orders_in_time_window(client, location_id, hours=0, days=0, weeks=0):
+    """
+    Search completed orders that occurred within the last 'hours', 'days', or 'weeks'.
+    Returns a list of orders.
+    """
+    start_at, end_at = get_time_range(hours, days, weeks)
+    
+    # Build the request with date/time filter and state filter
+    request_body = {
+        "location_ids": [location_id],
         "query": {
             "filter": {
+                "state_filter": {
+                    "states": ["COMPLETED"]
+                },
                 "date_time_filter": {
                     "created_at": {
-                        "start_at": start_date,
-                        "end_at": end_date
+                        "start_at": start_at,  # Only orders created after this datetime
+                        "end_at": end_at       # and before this datetime
                     }
                 }
             }
         }
     }
+    
+    response = client.orders.search_orders(body=request_body)
+    
+    if response.is_success():
+        return response.body.get("orders", [])
+    else:
+        print("Error searching orders:", response.errors)
+        return []
 
-    result = client.orders.search_orders(body)
+def remove_stock(product_id, amount_to_remove)
+    stock_count_url = "https://anywhere-solutions-pty-ltd.booqable.com/api/3/stock_counts"
+    request_body = {
+        "data": {
+            "type":"stock_counts",
+            "attributes": {
+                "item_id": product_id,
+                "quantity": -amount_to_remove
+            }
+        }
+    }
+    response = requests.post(stock_count_url, headers=headers, body=request_body)
 
-    if result.is_success():
-        orders = result.body.get("orders", [])
-        new_sold_items = []
-
-        for order in orders:
-            order_id = order.get("id")
-            created_at = order.get("created_at")  # Timestamp from Square
-
-            for item in order.get("line_items", []):
-                sku = item.get("catalog_object_id")
-                quantity = int(item.get("quantity", 0))
-
-                if sku and quantity > 0:
-                    new_sold_items.append({"order_id": order_id, "sku": sku, "quantity": quantity, "created_at": created_at})
-
-        if new_sold_items:
-            recovered_orders = save_sold_items(new_sold_items)
-
-            # Generate timestamp for CSV
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"{csv_prefix}_{timestamp}.csv"
-
-            save_to_csv(new_sold_items, filename)
-
-            if recovered_orders:
-                print("✅ Recovered missing sales data:")
-                for item in recovered_orders:
-                    print(f"Order ID: {item['order_id']}, SKU: {item['sku']}, Quantity: {item['quantity']}, Date: {item['created_at']}")
-            else:
-                print("✅ No missing orders found in this time period.")
-
-        else:
-            print("No new orders found in this time range.")
-
-    elif result.is_error():
-        print("❌ Error fetching orders:", result.errors)
 
 # Auto-run for the last 1 hour (normal operation)
 def run_hourly():
     now = datetime.now(timezone.utc)
     one_hour_ago = now - timedelta(hours=1)
 
+    orders_last_week = search_completed_orders_in_time_window(client, location_id, hour=1)
+    order_skus = get_skus_for_orders(client, orders_last_week)
+    print(f"Found {len(orders_last_week)} completed orders in the last week.")
+
+    # 5. Do something with the orders, e.g., print out line items
+    for (order_id, cat_id, sku, qty) in order_skus:
+            print(f"Order ID: {order_id} | Catalog Obj: {cat_id} | SKU: {sku} | Quantity: {qty}")
+
     fetch_sold_items(one_hour_ago.isoformat(), now.isoformat(), "hourly")
 
 # Run manual recovery for a chosen date range
 def recover_missed_orders(days_back):
-    now = datetime.now(timezone.utc)
-    start_date = now - timedelta(days=days_back)
+    orders_last_week = search_completed_orders_in_time_window(client, location_id, days=1)
+    order_skus = get_skus_for_orders(client, orders_last_week)
+    print(f"Found {len(orders_last_week)} completed orders in the last week.")
 
-    print(f"⏳ Checking for missing orders from {start_date.date()} to {now.date()}...")
-    fetch_sold_items(start_date.isoformat(), now.isoformat(), "recovered")
+    # 5. Do something with the orders, e.g., print out line items
+    for (order_id, cat_id, sku, qty) in order_skus:
+            print(f"Order ID: {order_id} | Catalog Obj: {cat_id} | SKU: {sku} | Quantity: {qty}")
 
 # Choose between normal operation and recovery mode
 if __name__ == "__main__":
